@@ -102,13 +102,13 @@ def choose_action() -> str | None:
     for key, (label, _) in ACTIONS.items():
         print(f"  {key}) {label}")
     print("  0) 换文件 / 退出")
-    answer = ask("选择 [1]：", "1")
-    if answer is None or answer == "0":
-        return None
-    if answer in ACTIONS:
-        return answer
-    print("  没有这一项，再试一次。")
-    return choose_action()
+    while True:
+        answer = ask("选择 [1]：", "1")
+        if answer is None or answer == "0":
+            return None
+        if answer in ACTIONS:
+            return answer
+        print("  没有这一项，再试一次。")
 
 
 # ── 输出动作 ──────────────────────────────────────────────────────────────

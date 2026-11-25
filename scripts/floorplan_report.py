@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+from xml.sax.saxutils import escape
 
 from floorplan_io import SOLID_WALL_TYPES, FloorPlan, HeightParams, OPENING_TYPES
 
@@ -155,8 +156,12 @@ def summarize(plan: FloorPlan) -> dict[str, Any]:
         "rooms": {
             "count": len(plan.rooms),
             "matched": sum(1 for r in plan.rooms.values() if r.face is not None),
+            "faces": len(plan.faces),
+            # Per-room sums: two rooms pointing at one face are counted twice.
             "total_area_m2": sum(r.area_centerline_mm2 for r in plan.rooms.values()) / 1e6,
             "total_net_area_m2": sum(r.area_net_mm2 for r in plan.rooms.values()) / 1e6,
+            # Face-based total: deduplicated, use this for floor-area answers.
+            "total_face_area_m2": sum(f.area_mm2 for f in plan.faces) / 1e6,
             "items": room_rows,
         },
         "adjacency": {
@@ -272,7 +277,7 @@ def write_svg(plan: FloorPlan, path: str | Path, *, show_openings: bool = True) 
         size = min(width, height) * 0.022
         out.append(f'<text x="{fx(x):.2f}" y="{fy(y):.2f}" font-size="{size:.1f}" '
                    f'font-family="{font}" text-anchor="middle" fill="#0F172A">'
-                   f'{room.label_text}</text>')
+                   f'{escape(room.label_text)}</text>')
     out.append("</svg>")
     Path(path).write_text("\n".join(out), encoding="utf-8")
 
@@ -334,7 +339,12 @@ def _compound_patch(geom: Any, **kwargs: Any) -> Any:
 
 
 def write_png(plan: FloorPlan, path: str | Path, dpi: int = 150) -> None:
-    """Matplotlib raster of the same layers (needs `uv sync --extra png`)."""
+    """Matplotlib raster of the same layers (needs `uv sync --extra png`).
+
+    The figure follows the plan bounds (an elongated plan no longer sits in a
+    14x10 sheet with mostly white space), rooms sharing one face are filled and
+    labelled once, and a scale bar sits in the bottom-left margin.
+    """
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -346,10 +356,24 @@ def write_png(plan: FloorPlan, path: str | Path, dpi: int = 150) -> None:
                                        "DejaVu Sans"]
     plt.rcParams["axes.unicode_minus"] = False
 
-    fig, ax = plt.subplots(figsize=(14, 10))
+    solid = plan.wall_solid_all()
+    minx, miny, maxx, maxy = (solid.bounds if not solid.is_empty
+                              else (0.0, 0.0, 1000.0, 1000.0))
+    width, height = max(maxx - minx, 1.0), max(maxy - miny, 1.0)
+    base = 11.0
+    figsize = ((base, base * height / width + 1.2) if width >= height
+               else (base * width / height + 1.2, base))
+
+    fig, ax = plt.subplots(figsize=figsize)
+    # One fill per face: rooms sharing a face would otherwise stack alpha twice.
+    fills: dict[str, Any] = {}
     for room in plan.rooms.values():
         if room.face is None:
             continue
+        prev = fills.get(room.face.id)
+        if prev is None or (not prev.color and room.color):
+            fills[room.face.id] = room
+    for room in fills.values():
         patch = _compound_patch(room.face.polygon, facecolor=room.color or "#E2E8F0",
                                 alpha=0.22, edgecolor=room.color or ROOM_STROKE,
                                 linewidth=0.8, zorder=1)
@@ -365,20 +389,49 @@ def write_png(plan: FloorPlan, path: str | Path, dpi: int = 150) -> None:
             continue
         xs, ys = zip(*op.center_points)
         ax.plot(xs, ys, color=OPENING_STROKE.get(op.type, "#DC2626"), linewidth=2.5, zorder=4)
+
+    # Merge the labels of rooms that resolve to the same face.
+    labels: dict[str, tuple[tuple[float, float], list[str]]] = {}
     for room in plan.rooms.values():
-        if room.face is not None and room.label_text:
-            x, y = room.label_anchor_mm or room.face.centroid
-            ax.text(x, y, room.label_text, ha="center", va="center", fontsize=8, zorder=5)
+        if room.face is None or not room.label_text:
+            continue
+        anchor, names = labels.get(room.face.id, (room.label_anchor_mm or room.face.centroid, []))
+        labels[room.face.id] = (anchor, names + [room.label_text])
+    for (x, y), names in labels.values():
+        ax.text(x, y, " / ".join(dict.fromkeys(names)), ha="center", va="center",
+                fontsize=8, zorder=5)
 
     ax.set_aspect("equal")
     ax.set_facecolor("white")
     ax.grid(False)
+    ax.tick_params(labelsize=6)
+
+    padx = 0.07 * width
+    ax.set_xlim(minx - padx, maxx + padx)
+    # Extra bottom margin so the scale bar never sits on the plan.
+    ax.set_ylim(miny - 0.11 * height, maxy + 0.05 * height)
+    _draw_scale_bar(ax)
+
     ax.set_title(f"floorplan-json · scale {plan.frame.scale:.2f} mm/px · "
                  f"{len(plan.rooms)} rooms · {len(plan.walls)} walls", fontsize=8)
-    ax.tick_params(labelsize=6)
-    fig.tight_layout()
-    fig.savefig(path, dpi=dpi)
+    fig.savefig(path, dpi=dpi, bbox_inches="tight", facecolor="white")
     plt.close(fig)
+
+
+def _draw_scale_bar(ax: Any) -> None:
+    """Bottom-left scale bar in data coordinates (matplotlib only)."""
+    x_lo, x_hi = ax.get_xlim()
+    y_lo, y_hi = ax.get_ylim()
+    span, y_span = x_hi - x_lo, y_hi - y_lo
+    target = span / 5.0
+    candidates = [m * 10 ** e for m in (1, 2, 5) for e in (-3, -2, -1, 0, 1, 2)]
+    length = max([c * 1000 for c in candidates if c * 1000 <= target] or [500.0])
+    x0, y0 = x_lo + 0.04 * span, y_lo + 0.04 * y_span
+    ax.plot([x0, x0 + length], [y0, y0], color="#0F172A", lw=2, solid_capstyle="butt")
+    for dx in (0.0, length):
+        ax.plot([x0 + dx, x0 + dx], [y0, y0 + 0.012 * y_span], color="#0F172A", lw=1.2)
+    ax.text(x0 + length * 1.06, y0, f"{length / 1000:g} m", ha="left", va="center",
+            fontsize=7, color="#0F172A")
 
 
 def write_glb(plan: FloorPlan, path: str | Path, params: HeightParams | None = None) -> None:

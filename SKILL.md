@@ -65,7 +65,7 @@ def read(path):
 ```
 
 这段**刻意**省略了三件会让数字偏离编辑器的事：曲线墙采样、墙身缓冲、洞口退洞。
-补齐它们就是 `scripts/floorplan_io.py`（1241 行，按源码模块分段，函数名一一对应）。
+补齐它们就是 `scripts/floorplan_io.py`（1374 行，按源码模块分段，函数名一一对应）。
 每一步对应的 shapely 图元汇总在 `floorplan_report.PIPELINE`，交互式 CLI 会直接打印。
 
 ## 九条硬性约定
@@ -99,14 +99,16 @@ def read(path):
 | `uncalibrated` | 有底图 + 单位矩阵 | 拒绝出量化结论 |
 | `zero_length_wall` / `coincident_nodes` | 合并节点残留 | 保留记录、几何置空 |
 | `room_dangling_wall_ids` / `room_face_unmatched` | 房间边界墙已删 | 精确匹配 → Jaccard 容差匹配 → 否则丢弃 |
-| `room_face_shared` | 两个房间指向同一个面 | 面积不要直接求和 |
-| `opening_exceeds_wall` | `position·墙长 + width > 墙长` | 夹到墙长后再算 |
+| `room_face_shared` | 两个房间指向同一个面 | 面积不要直接求和；用 `summarize()["rooms"]["total_face_area_m2"]`（按面去重） |
+| `opening_exceeds_wall` | `position·墙长 + width > 墙长` | 几何已夹到墙长；`opening.effective_width_mm` 是实际可用宽度（`width_mm` 保留导出值） |
 | `node_wall_links_inconsistent` | `connectedWallIds` 过期 | 永远从 `walls[]` 反推度数 |
 
 另外两个纯数据坑：
 
 - `rooms[].label` 可能是 U+FFFD（上游编码丢字节，不可逆）。`room.label_text`
   会自动退回 color → 预设语义（卧室/客厅/走廊/卫生间/厨房/阳台…）。
+  纯高位字节的 GBK-as-cp1252 乱码（`ÎÔÊÒ`）由 `repair_mojibake` / `label_text` 自动复原，
+  含 ASCII 的拉丁名（`Café`）不动。
 - `rooms[].color` 同时是语义分类（`ROOM_PRESETS`），不是装饰色。
 
 ## 验证新实现是否正确
@@ -115,8 +117,9 @@ def read(path):
 
 1. **自洽**：`wall_solid(type, cut_openings=False).area` ≥ `wall_solid(type).area`；
    `band − solid` 应约等于门窗洞口的截面积之和。
-2. **回归**：`FLOORPLAN_SAMPLE=<path> uv run pytest -q tests/test_reference_parity.py`，
-   期望 `scale=25.731177959342716`、外墙 14.914740 / 10.970546 m²、8 个面、13 对相邻面。
+2. **回归**：`FLOORPLAN_SAMPLE=<path> uv run pytest -q tests/test_reference_parity.py`（缺省用
+   `assets/reference-floorplan.json`），期望 `scale=25.731177959342716`、外墙
+   14.914740 / 10.970546 m²、8 个面、13 对相邻面。
    这些数字直接取自 TypeScript 源码的输出。
 3. **3D**：`plan.wall_slabs(type)` 的 z 分界应等于洞口高度值（0/900/2100/2400/3000），
    最顶一层等于未退洞的实心带面积；按 recipe §13 拉伸后每个 mesh 应 `is_watertight`。
@@ -141,6 +144,8 @@ plan.wall_solid("exterior")                  # 真实墙身截面（mm²，已�
 plan.rooms["<id>"].area_m2                   # 墙中线围合面积
 plan.rooms["<id>"].net_area_m2               # 扣墙厚
 plan.room_adjacency()                        # 房间对 + 共享墙 + 可通行门
+plan.degrees()                               # 节点度；components() / isolated_nodes() 同类
+plan.to_grid(geom)                            # 把 mm 几何旋到标定网格（仅展示用）
 plan.wall_slabs("exterior")                  # 按洞口高度分段的 3D 截面
 plan.raw                                     # 未解析的原始记录（柱/家具/轴网/…）
 
@@ -163,12 +168,13 @@ uv run python scripts/floorplan_inspect.py plan.json   # 脚本用法：只打�
 产物写到 `out/<文件名>/`。
 
 技能自带一个合成样例 `assets/sample-floorplan.json`（2 房间 / 7 墙 / 3 洞口）；
-`tests/` 里 30 个用例覆盖核心算法、配方、交互式 CLI 与 TS 对账。
+`tests/` 里 40 个用例覆盖核心算法、配方、交互式 CLI、SVG/PNG 与 TS 对账。
 
 ## 常见追问怎么回
 
 - "每个房间多大" → `room.area_m2`（墙中线，和编辑器侧栏一致）；
-  "实际能用多大" → `room.net_area_m2`（扣墙厚）。两者别混用。
+  "实际能用多大" → `room.net_area_m2`（扣墙厚）。两者别混用；
+  "一层多少面积" → `summarize()["rooms"]["total_face_area_m2"]`（按面去重，房间行会重复计同面）。
 - "哪里是承重墙" → 数据只有 `type`，`exterior/brick_wall` 按重墙处理；
   没有材料、结构信息，不要臆造。
 - "层高多少" → JSON 里**没有**，是导出假设值（默认 3000，`HeightParams`）。
@@ -176,6 +182,8 @@ uv run python scripts/floorplan_inspect.py plan.json   # 脚本用法：只打�
 - "导出 3D" → `report.write_glb(plan, "plan.glb")`；原理见 recipe §13。
   要 IFC 请回编辑器导出（本技能只读 JSON）。
 - "柱/家具/轴网/楼梯呢" → 没进读入器：字段是自足参数，recipe §10–§12 十行以内。
+- "功能关系/泡泡图" → recipe §2.1：气泡=房间面，边=共墙，实线=有门；数据用
+  `face_adjacency()` 或 `summarize()["adjacency"]`（面-面，不会把同面房间交叉相乘）。
 
 ## 文件
 
@@ -184,9 +192,10 @@ SKILL.md
 references/protocol.md      数据协议（字段/单位/语义/异常）
 references/algorithms.md    算法复刻（公式 + 参数 + 实测对账）
 references/recipes.md       分析配方（面积/邻接/工程量/掩膜/疏散/可选实体/3D）
-scripts/floorplan_io.py     读入器：九条约定 + 体检（1241 行，只依赖 shapely）
+scripts/floorplan_io.py     读入器：九条约定 + 体检（1374 行，只依赖 shapely）
 scripts/floorplan_report.py 摘要 + SVG/PNG/GeoJSON/GLB + PIPELINE 图元对照表
 scripts/floorplan_inspect.py 交互式 CLI（选文件 → 选动作 → 打印用到的图元）
-assets/sample-floorplan.json 合成样例
-tests/                      30 个用例（含与 TS 源码的回归对账）
+assets/sample-floorplan.json 合成样例（2 房间 / 7 墙 / 3 洞口）
+assets/reference-floorplan.json 真实导出（回归对账用的样本）
+tests/                      40 个用例（含与 TS 源码的回归对账）
 ```

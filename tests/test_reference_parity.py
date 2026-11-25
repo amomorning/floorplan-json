@@ -7,7 +7,8 @@ results for the sample file — i.e. they are the source's truth, not a
 re-derivation of this port. Any drift in the Python reader shows up here.
 
 Point FLOORPLAN_SAMPLE at any exported plan to re-run it; the default is the
-sample shipped with the floorplan-konva workspace.
+real export shipped as `assets/reference-floorplan.json` (the synthetic sample
+is 2 rooms and does not exercise the full pipeline).
 """
 
 import math
@@ -18,7 +19,8 @@ import pytest
 
 from floorplan_io import load_floorplan
 
-SAMPLE = os.environ.get("FLOORPLAN_SAMPLE") or "D:/Amo/Desktop/floorplan-dsh/data/floorplan-1795589871235.json"
+DEFAULT_SAMPLE = Path(__file__).resolve().parent.parent / "assets" / "reference-floorplan.json"
+SAMPLE = os.environ.get("FLOORPLAN_SAMPLE") or str(DEFAULT_SAMPLE)
 
 pytestmark = pytest.mark.skipif(not Path(SAMPLE).exists(), reason="reference sample not available")
 

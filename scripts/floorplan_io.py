@@ -65,6 +65,7 @@ __all__ = [
     "WallGeom",
     "load_floorplan",
     "parse_floorplan",
+    "repair_mojibake",
 ]
 
 Point2 = tuple[float, float]
@@ -100,6 +101,27 @@ DEFAULT_IFC_PARAMS: dict[str, float] = {
     "wall_height": 3000.0, "railing_height": 1100.0, "door_height": 2100.0,
     "window_sill": 900.0, "window_height": 1500.0,
 }
+
+
+def repair_mojibake(text: str | None) -> str | None:
+    """Undo the classic GBK-bytes-read-as-cp1252 room label.
+
+    Upstream sometimes reads a GBK label with a Latin-1/cp1252 decoder, so 卧室
+    (CE D4 CA D2) arrives as 'ÎÔÊÒ'. Deliberately conservative: only pure
+    high-byte strings qualify, so real Latin names such as 'Café' (ASCII in
+    there) are never touched, and the rewrite only sticks when it lands on CJK.
+    """
+    if not text or len(text) < 2:
+        return text
+    if any(ord(ch) < 0xA0 for ch in text):
+        return text
+    try:
+        fixed = text.encode("cp1252").decode("gbk")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return text
+    if "\ufffd" in fixed or not any("\u4e00" <= ch <= "\u9fff" for ch in fixed):
+        return text
+    return fixed
 
 
 # ── polyline helpers (pure; point = tuple[float, float] in mm) ──────────────
@@ -312,6 +334,20 @@ class Frame:
         cos, sin = math.cos(theta), math.sin(theta)
         return ((x * cos + y * sin) * self.scale, (-x * sin + y * cos) * self.scale)
 
+    def to_grid(self, geom: Any) -> Any:
+        """Rotate emitted mm geometry into the calibrated grid frame.
+
+        The reader emits geometry in the background-image frame, so a rotated
+        `imageTransform` (`rotation_deg != 0`) makes plans come out tilted.
+        Rotating by -rotation_deg about the origin aligns walls with the grid
+        axes; this is presentation only, areas are unchanged.
+        """
+        if abs(self.rotation_deg) < 1e-9:
+            return geom
+        from shapely import affinity
+
+        return affinity.rotate(geom, -self.rotation_deg, origin=(0.0, 0.0))
+
 
 @dataclass
 class Issue:
@@ -364,6 +400,8 @@ class OpeningGeom:
     z_range_mm: tuple[float, float]
     passable: bool
     outside: bool
+    effective_width_mm: float = 0.0      # width actually inside the wall span
+    clamped: bool = False                # effective < declared width (overrun/lost)
     room_ids: list[str] = field(default_factory=list)
 
     def z_range(self, params: HeightParams) -> tuple[float, float]:
@@ -420,11 +458,13 @@ class RoomGeom:
 
     @property
     def label_text(self) -> str | None:
-        """`label` carrying U+FFFD lost its bytes upstream (seen in real files);
-        the colour-derived preset label is then the only trustworthy semantic."""
-        if self.label and "\ufffd" not in self.label:
-            return self.label
-        return self.preset_label or self.label
+        """`label`, with GBK-as-cp1252 mojibake repaired; a label carrying
+        U+FFFD lost its bytes upstream (irreversible), and the colour-derived
+        preset is then the only trustworthy semantic."""
+        label = repair_mojibake(self.label)
+        if label and "\ufffd" not in label:
+            return label
+        return self.preset_label or label
 
 
 @dataclass
@@ -519,6 +559,9 @@ class FloorPlan:
         self._chains: list[_Chain] = []
         self._spans: dict[str, list[Point2]] = {}
         self._solids_cache: dict[bool, dict[str, Polygon]] = {}
+        # adjacency is O(faces^2 * walls); a parsed plan is immutable, so cache it
+        self._face_adj_cache: list[tuple[Face, Face, tuple[str, ...], float]] | None = None
+        self._room_adj_cache: list[Adjacency] | None = None
 
         self._read_nodes(data)
         self.walls = self._read_walls(data)
@@ -807,7 +850,8 @@ class FloorPlan:
             out[wtype] = geom
 
         railings = [w for w in self.walls.values() if w.type == "railing"]
-        out["railing"] = self._group_solid(railings, "railing", False) if railings else Polygon()
+        out["railing"] = (self._group_solid(railings, "railing", cut)
+                          if railings else Polygon())
         out["level_change"] = Polygon()
         self._solids_cache[cut] = out
         return out
@@ -824,6 +868,11 @@ class FloorPlan:
         geoms = [g for g in self._typed_solids(cut_openings).values() if not g.is_empty]
         return unary_union(geoms) if geoms else Polygon()
 
+    def to_grid(self, geom: Any) -> Any:
+        """Any emitted mm geometry rotated into the calibrated grid frame.
+        See `Frame.to_grid`; presentation only."""
+        return self.frame.to_grid(geom)
+
     # ── openings ───────────────────────────────────────────────────────────
     def _read_openings(self, data: Mapping[str, Any]) -> dict[str, OpeningGeom]:
         out: dict[str, OpeningGeom] = {}
@@ -831,28 +880,36 @@ class FloorPlan:
             otype = str(rec.get("type", "door"))
             wall = self.walls.get(str(rec.get("wallId", "")))
             geom = self._opening_geometry(rec, wall) if wall is not None else None
-            center, start, end, normal, footprint = geom or ([], None, None, (0.0, 1.0), Polygon())
+            center, start, end, normal, footprint, effective = geom or (
+                [], None, None, (0.0, 1.0), Polygon(), 0.0)
+            declared = float(rec.get("width", 0))
             is_window = otype == "window"
             z0 = DEFAULT_IFC_PARAMS["window_sill"] if is_window else 0.0
             z1 = z0 + (DEFAULT_IFC_PARAMS["window_height"] if is_window
                        else DEFAULT_IFC_PARAMS["door_height"])
             out[oid] = OpeningGeom(
                 record=dict(rec), id=oid, type=otype, wall=wall,
-                width_mm=float(rec.get("width", 0)), position=float(rec.get("position", 0)),
+                width_mm=declared, position=float(rec.get("position", 0)),
                 direction=int(rec.get("direction", 1)), hinge_side=rec.get("hingeSide"),
                 span_wall_ids=tuple(rec.get("spanWallIds") or ()),
                 footprint=footprint, center_points=center, start_mm=start, end_mm=end,
                 wall_normal=normal, z_range_mm=(z0, z1),
                 passable=otype in PASSABLE_OPENING_TYPES,
-                outside=wall is not None and wall.type in EXTERIOR_WALL_TYPES)
+                outside=wall is not None and wall.type in EXTERIOR_WALL_TYPES,
+                effective_width_mm=effective,
+                clamped=effective < declared - 1e-6)
             if wall is not None:
                 wall.opening_ids.append(oid)
         return out
 
     def _opening_geometry(self, rec: Mapping[str, Any], wall: WallGeom
-                          ) -> tuple[list[Point2], Point2 | None, Point2 | None, Point2, Polygon] | None:
+                          ) -> tuple[list[Point2], Point2, Point2, Point2, Polygon, float] | None:
         """openingToWorldCoords: `position` is an ARC FRACTION on the anchor
-        span; `width` travels along the spanWallIds chain."""
+        span; `width` travels along the spanWallIds chain.
+
+        The source lets an opening overrun the wall tip; here both ends are
+        CLAMPED to the span and the usable width is returned so the cut strip
+        and the reported width never disagree (see `effective_width_mm`)."""
         anchor = self._spans.get(wall.id, [])
         if len(anchor) < 2:
             return None
@@ -861,11 +918,15 @@ class FloorPlan:
             return None
         span_ids = tuple(rec.get("spanWallIds") or ())
         pts = (self._join_span(span_ids) if len(span_ids) > 1 else None) or anchor
-        if polyline_length(pts) < 1e-6:
+        span_len = polyline_length(pts)
+        if span_len < 1e-6:
             return None
 
-        s_start = float(rec.get("position", 0)) * anchor_len
-        s_end = s_start + float(rec.get("width", 0))
+        s_start = min(max(float(rec.get("position", 0)) * anchor_len, 0.0), span_len)
+        s_end = min(max(s_start + float(rec.get("width", 0)), s_start), span_len)
+        effective = s_end - s_start
+        if effective < 1e-6:
+            return None
         start_hit = polyline_point_at_arc(pts, s_start)
         end_hit = polyline_point_at_arc(pts, s_end)
         if start_hit is None or end_hit is None:
@@ -876,7 +937,8 @@ class FloorPlan:
             return None
         eps = max(CAP_EPS_PX * self.frame.scale, wall.thickness / 2 * 0.02)
         return (center, start, end_hit[0], (-tangent[1], tangent[0]),
-                strip_polygon(center, wall.thickness / 2 + eps, (-tangent[1], tangent[0])))
+                strip_polygon(center, wall.thickness / 2 + eps, (-tangent[1], tangent[0])),
+                effective)
 
     def _join_span(self, wall_ids: Sequence[str]) -> list[Point2] | None:
         """buildOpeningSpan: walls joined node-by-node into one polyline."""
@@ -965,10 +1027,10 @@ class FloorPlan:
                     if face is not None:
                         match = "tolerant"
                         self.issues.append(Issue(
-                            "info", "room_face_tolerant", rid,
-                            f"room wallIds do not match a face exactly; matched face "
-                            f"{face.id} (Jaccard >= 0.5) — the wall graph changed since the "
-                            "room was drawn"))
+                            "info", "room_face_tolerant", entity=rid,
+                            message=f"room wallIds do not match a face exactly; matched "
+                                    f"face {face.id} (Jaccard >= 0.5) — the wall graph "
+                                    "changed since the room was drawn"))
 
             preset = ROOM_PRESETS.get(str(rec.get("color")).upper())
             if face is None:
@@ -1010,23 +1072,40 @@ class FloorPlan:
             return float(polygon.area)
 
     def _link_rooms_and_openings(self) -> None:
+        """Bind openings to rooms.
+
+        Wall-bounded rooms match by wall id (an opening on a shared wall belongs
+        to both sides). Hand-drawn rooms carry no wallIds, so they match by
+        geometry: an opening whose centre lies on the room boundary."""
         for room in self.rooms.values():
             if room.face is None:
                 continue
             walls = set(room.wall_ids)
+            boundary = room.face.polygon.boundary if not walls else None
             for op in self.openings.values():
-                if op.wall is None:
+                if op.wall is None or not op.center_points:
                     continue
-                if op.wall.id in walls or walls.intersection(op.span_wall_ids):
-                    room.openings.append(op)
-                    op.room_ids.append(room.id)
-                    if op.type == "window":
-                        room.windows.append(op)
-                    elif op.passable:
-                        room.doors.append(op)
+                hit = op.wall.id in walls or bool(walls.intersection(op.span_wall_ids))
+                if not hit and boundary is not None:
+                    mid = Point(op.center_points[len(op.center_points) // 2])
+                    hit = boundary.distance(mid) <= max(50.0, op.wall.thickness / 2)
+                if not hit:
+                    continue
+                room.openings.append(op)
+                op.room_ids.append(room.id)
+                if op.type == "window":
+                    room.windows.append(op)
+                elif op.passable:
+                    room.doors.append(op)
 
     def face_adjacency(self) -> list[tuple[Face, Face, tuple[str, ...], float]]:
-        """Face pairs sharing a boundary segment > 1 mm, with the walls on it."""
+        """Face pairs sharing a boundary segment > 1 mm, with the walls on it.
+
+        Cached: a parsed plan is immutable, and the pairwise intersection is the
+        most expensive scan in the module.
+        """
+        if self._face_adj_cache is not None:
+            return self._face_adj_cache
         out = []
         for i, fa in enumerate(self.faces):
             for fb in self.faces[i + 1:]:
@@ -1047,12 +1126,20 @@ class FloorPlan:
                         except shapely.errors.GEOSException:
                             continue
                 out.append((fa, fb, tuple(dict.fromkeys(wall_ids)), float(shared.length)))
+        self._face_adj_cache = out
         return out
 
     def room_adjacency(self) -> list[Adjacency]:
         """Room↔room edges: adjacent faces -> shared walls -> passable openings
         on them (RoomService.roomAdjacency + hasDoorBetween). Rooms resolved
-        from the same face are never adjacent: one room per face."""
+        from the same face are never adjacent: one room per face.
+
+        Note: rooms sharing a face are cross-multiplied here, so one face pair
+        can yield several room pairs. Use `face_adjacency()` for a canonical
+        one-edge-per-boundary graph (e.g. a bubble diagram).
+        """
+        if self._room_adj_cache is not None:
+            return self._room_adj_cache
         rooms_by_face: dict[str, list[RoomGeom]] = {}
         for room in self.rooms.values():
             if room.face is not None:
@@ -1074,7 +1161,49 @@ class FloorPlan:
                             dict.fromkeys(prev.opening_ids + tuple(o.id for o in passable)))),
                         passable=bool(passable) or (prev.passable if prev else False),
                         shared_length_mm=shared_len + (prev.shared_length_mm if prev else 0.0))
-        return list(merged.values())
+        self._room_adj_cache = list(merged.values())
+        return self._room_adj_cache
+
+    # ── wall graph (nodes + degrees, no room semantics) ──────────────────────
+    def node_adjacency(self) -> dict[str, set[str]]:
+        """Node -> neighbouring nodes, derived from `walls` (never from the
+        possibly stale `connectedWallIds`)."""
+        adj: dict[str, set[str]] = {nid: set() for nid in self._nodes_px}
+        for wall in self.walls.values():
+            a, b = wall.start_node, wall.end_node
+            if a in adj and b in adj and a != b:
+                adj[a].add(b)
+                adj[b].add(a)
+        return adj
+
+    def degrees(self) -> dict[str, int]:
+        """Node -> number of walls meeting there (degree 0 = isolated)."""
+        return {nid: len(neighbours) for nid, neighbours in self.node_adjacency().items()}
+
+    def components(self) -> list[list[str]]:
+        """Connected node groups, largest first (isolated nodes are 1-element)."""
+        adj = self.node_adjacency()
+        seen: set[str] = set()
+        groups: list[list[str]] = []
+        for start in adj:
+            if start in seen:
+                continue
+            stack, group = [start], []
+            seen.add(start)
+            while stack:
+                nid = stack.pop()
+                group.append(nid)
+                for neighbour in adj[nid]:
+                    if neighbour not in seen:
+                        seen.add(neighbour)
+                        stack.append(neighbour)
+            groups.append(sorted(group))
+        groups.sort(key=len, reverse=True)
+        return groups
+
+    def isolated_nodes(self) -> list[str]:
+        """Nodes no wall references (degree 0)."""
+        return sorted(nid for nid, degree in self.degrees().items() if degree == 0)
 
     # ── 3D slabs (z-split; extrusion itself is a recipe) ───────────────────
     def wall_slabs(self, wall_type: str, params: HeightParams | None = None) -> list[Slab]:
@@ -1131,15 +1260,17 @@ class FloorPlan:
         for wid, wall in self.walls.items():
             if wall.start_node not in self._nodes_px or wall.end_node not in self._nodes_px:
                 self.issues.append(Issue(
-                    "warning", "wall_node_missing", wid,
-                    f"wall references a missing node ({wall.start_node} -> {wall.end_node}); "
-                    "its geometry is dropped"))
+                    "warning", "wall_node_missing", entity=wid,
+                    message=f"wall references a missing node "
+                            f"({wall.start_node} -> {wall.end_node}); its geometry is "
+                            "dropped"))
             elif wall.length_mm < 1e-6:
-                self.issues.append(Issue("warning", "zero_length_wall", wid,
-                                         "both nodes coincide; the wall has no body"))
+                self.issues.append(Issue("warning", "zero_length_wall", entity=wid,
+                                         message="both nodes coincide; the wall has no body"))
             if wall.type not in WALL_TYPES:
-                self.issues.append(Issue("warning", "unknown_wall_type", wid,
-                                         f"unknown wall type '{wall.type}' (treated as solid)"))
+                self.issues.append(Issue("warning", "unknown_wall_type", entity=wid,
+                                         message=f"unknown wall type '{wall.type}' "
+                                                 "(treated as solid)"))
 
         seen: dict[tuple[float, float], list[str]] = {}
         for nid, (x, y) in self._nodes_px.items():
@@ -1147,9 +1278,9 @@ class FloorPlan:
         for (x, y), ids in seen.items():
             if len(ids) > 1:
                 self.issues.append(Issue(
-                    "info", "coincident_nodes", ",".join(ids),
-                    f"{len(ids)} distinct nodes share the coordinate ({x}, {y}) — "
-                    "zero-length walls and doubled rooms are common here"))
+                    "info", "coincident_nodes", entity=",".join(ids),
+                    message=f"{len(ids)} distinct nodes share the coordinate ({x}, {y}) — "
+                            "zero-length walls and doubled rooms are common here"))
 
         for nid, rec in self._node_records.items():
             expected = sorted(w.id for w in self.walls.values()
@@ -1157,22 +1288,22 @@ class FloorPlan:
             given = sorted(str(i) for i in (rec.get("connectedWallIds") or []))
             if expected != given:
                 self.issues.append(Issue(
-                    "info", "node_wall_links_inconsistent", nid,
-                    "connectedWallIds does not match the walls referencing this node "
-                    "(derived links are authoritative)"))
+                    "info", "node_wall_links_inconsistent", entity=nid,
+                    message="connectedWallIds does not match the walls referencing this "
+                            "node (derived links are authoritative)"))
 
         for rid, room in self.rooms.items():
             dangling = [w for w in (room.record.get("wallIds") or []) if w not in self.walls]
             if dangling:
                 self.issues.append(Issue(
-                    "warning", "room_dangling_wall_ids", rid,
-                    f"room references {len(dangling)} wall(s) that are not in the file "
-                    f"({', '.join(dangling[:4])})"))
+                    "warning", "room_dangling_wall_ids", entity=rid,
+                    message=f"room references {len(dangling)} wall(s) that are not in the "
+                            f"file ({', '.join(dangling[:4])})"))
             if room.face is None:
                 self.issues.append(Issue(
-                    "warning", "room_face_unmatched", rid,
-                    "room boundary does not close a face in the wall graph "
-                    "(deleted wall, or a custom polygon is required)"))
+                    "warning", "room_face_unmatched", entity=rid,
+                    message="room boundary does not close a face in the wall graph "
+                            "(deleted wall, or a custom polygon is required)"))
 
         by_face: dict[str, list[str]] = {}
         for rid, room in self.rooms.items():
@@ -1181,9 +1312,9 @@ class FloorPlan:
         for face_id, rids in by_face.items():
             if len(rids) > 1:
                 self.issues.append(Issue(
-                    "warning", "room_face_shared", ",".join(rids),
-                    f"{len(rids)} rooms resolve to the same face ({face_id[:24]}…); "
-                    "the same area is counted more than once"))
+                    "warning", "room_face_shared", entity=",".join(rids),
+                    message=f"{len(rids)} rooms resolve to the same face "
+                            f"({face_id[:24]}…); the same area is counted more than once"))
 
         for oid, op in self.openings.items():
             if op.wall is None:
@@ -1192,23 +1323,25 @@ class FloorPlan:
                                          "is not in the file"))
                 continue
             if op.type not in OPENING_TYPES:
-                self.issues.append(Issue("warning", "unknown_opening_type", oid,
-                                         f"unknown opening type '{op.type}'"))
+                self.issues.append(Issue("warning", "unknown_opening_type", entity=oid,
+                                         message=f"unknown opening type '{op.type}'"))
             anchor_len = polyline_length(self._spans.get(op.wall.id, []))
             span_len = anchor_len
             if len(op.span_wall_ids) > 1:
                 joined = self._join_span(op.span_wall_ids)
                 if joined is None:
                     self.issues.append(Issue(
-                        "warning", "opening_span_broken", oid,
-                        "spanWallIds is not a continuous chain; falling back to the anchor wall"))
+                        "warning", "opening_span_broken", entity=oid,
+                        message="spanWallIds is not a continuous chain; falling back to "
+                                "the anchor wall"))
                 else:
                     span_len = polyline_length(joined)
             if anchor_len > 0 and op.position * anchor_len + op.width_mm > span_len + 1e-3:
                 self.issues.append(Issue(
-                    "warning", "opening_exceeds_wall", oid,
-                    f"opening spans {op.position * anchor_len + op.width_mm:.0f} mm along a "
-                    f"{span_len:.0f} mm wall (position + width overrun)"))
+                    "warning", "opening_exceeds_wall", entity=oid,
+                    message=f"opening spans {op.position * anchor_len + op.width_mm:.0f} mm "
+                            f"along a {span_len:.0f} mm wall (position + width overrun); "
+                            f"geometry is clamped to {op.effective_width_mm:.0f} mm"))
 
 # ── entry points ───────────────────────────────────────────────────────────
 

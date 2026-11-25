@@ -123,7 +123,9 @@ n_i = normalize( -(P_{i+1} − P_{i−1}).y , (P_{i+1} − P_{i−1}).x )
 首尾点用自身做邻居（即弦法向）。2 点跨度 → 常量弦法向，与旧矩形切口逐位一致。
 
 圆弧长度参数化（`polylinePointAtArc`）**不夹取**：编辑器允许洞口越过墙端；
-`polylineSlice` 则夹取到 `[0, 总长]`。
+`polylineSlice` 则夹取到 `[0, 总长]`。直接照抄会得到“端点外插、切割带被夹取”的
+自相矛盾结果，所以读入器把两端都夹到 `[0, span_len]`，并把实际可用长度写进
+`OpeningGeom.effective_width_mm`（`width_mm` 仍保留导出值，`clamped` 标记两者不一致）。
 
 ## 7. 面提取与房间匹配
 

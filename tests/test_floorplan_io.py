@@ -314,3 +314,112 @@ def test_frame_aligned_axes_and_uv():
     assert (nx, ny) == pytest.approx((-1.0, 0.0), abs=1e-9)
     u, v = plan.frame.uv_from_px(10, 0)
     assert (u, v) == pytest.approx((0.0, -10 * S), abs=1e-9)
+
+
+# ── polish: issue payloads, clamped openings, custom rooms, graph, grid ────
+
+def test_issue_message_and_entity_are_not_swapped():
+    data = apartment()
+    data["walls"]["w6"] = {"id": "w6", "startNodeId": "n1", "endNodeId": "missing",
+                           "thickness": 200, "type": "interior"}
+    data["rooms"]["r1b"] = {"id": "r1b", "wallIds": data["rooms"]["r1"]["wallIds"]}
+    plan = load_floorplan(data)
+
+    missing = next(i for i in plan.issues if i.code == "wall_node_missing")
+    assert missing.entity == "w6"
+    assert missing.message.startswith("wall references a missing node")
+
+    shared = next(i for i in plan.issues if i.code == "room_face_shared")
+    assert set(shared.entity.split(",")) == {"r1", "r1b"}
+    assert "same face" in shared.message
+
+    # a message is prose, never a bare record id
+    assert all(" " in issue.message for issue in plan.issues)
+
+
+def test_opening_overrunning_the_span_is_clamped_and_reported():
+    data = apartment()
+    data["openings"]["wide"] = {"id": "wide", "wallId": "w1a", "type": "window",
+                                "position": 0.9, "width": 1500, "direction": 1}
+    plan = load_floorplan(data)
+    op = plan.openings["wide"]
+
+    assert op.width_mm == 1500          # the declared width is kept
+    assert op.effective_width_mm == pytest.approx(250.0)   # only 10% of w1a fits
+    assert op.clamped is True
+    assert "opening_exceeds_wall" in codes(plan)
+    # start/end agree with the clamped cut strip: nothing sticks out of the wall
+    assert plan.walls["w1a"].centerline.distance(Point(op.end_mm)) < 1e-6
+    assert plan.walls["w1a"].length_mm == pytest.approx(2500.0)
+
+    normal = plan.openings["d1"]
+    assert normal.clamped is False
+    assert normal.effective_width_mm == pytest.approx(normal.width_mm)
+
+
+def test_custom_room_links_openings_geometrically():
+    data = apartment()
+    data["rooms"] = {"custom": {"id": "custom", "wallIds": [], "points": [
+        {"x": 150, "y": 60}, {"x": 250, "y": 60},
+        {"x": 250, "y": 180}, {"x": 150, "y": 180}]}}
+    plan = load_floorplan(data)
+    room = plan.rooms["custom"]
+
+    assert room.match == "custom"
+    # d1 sits on the hand-drawn boundary (w5), win on w3a; entry (w4) is outside.
+    assert [o.id for o in room.doors] == ["d1"]
+    assert [o.id for o in room.windows] == ["win"]
+    assert plan.openings["d1"].room_ids == ["custom"]
+
+
+def test_digest_uses_deduplicated_face_area():
+    data = apartment()
+    data["rooms"]["r1b"] = {"id": "r1b", "wallIds": data["rooms"]["r1"]["wallIds"]}
+    plan = load_floorplan(data)
+    rooms = summarize(plan)["rooms"]
+
+    assert rooms["count"] == 3 and rooms["faces"] == 2
+    assert rooms["total_area_m2"] == pytest.approx(22.5)       # 3 room rows
+    assert rooms["total_face_area_m2"] == pytest.approx(15.0)  # 2 faces
+
+
+def test_wall_graph_degrees_components_and_isolated_nodes():
+    data = apartment()
+    data["nodes"]["lonely"] = {"id": "lonely", "x": 10, "y": 10, "connectedWallIds": []}
+    plan = load_floorplan(data)
+
+    assert plan.degrees()["n5"] == 3
+    assert plan.isolated_nodes() == ["lonely"]
+    groups = plan.components()
+    assert groups[0] == sorted(["n1", "n2", "n3", "n4", "n5", "n6"])
+    assert ["lonely"] in groups
+    assert plan.node_adjacency()["n1"] == {"n5", "n4"}
+
+
+def test_frame_to_grid_rotates_geometry_by_minus_rotation():
+    data = apartment()
+    data["imageTransform"] = _matrix(rot=math.radians(30))
+    plan = load_floorplan(data)
+    line = plan.walls["w1a"].centerline
+    aligned = plan.to_grid(line)
+
+    original = math.degrees(math.atan2(line.coords[-1][1] - line.coords[0][1],
+                                       line.coords[-1][0] - line.coords[0][0]))
+    rotated = math.degrees(math.atan2(aligned.coords[-1][1] - aligned.coords[0][1],
+                                      aligned.coords[-1][0] - aligned.coords[0][0]))
+    assert rotated - original == pytest.approx(-30.0, abs=1e-9)
+    assert aligned.length == pytest.approx(line.length)     # rotation is isometric
+
+
+def test_label_mojibake_is_repaired_but_latin_names_are_kept():
+    from floorplan_io import repair_mojibake
+
+    assert repair_mojibake("\u00ce\u00d4\u00ca\u00d2") == "卧室"   # GBK read as cp1252
+    assert repair_mojibake("Café") == "Café"                      # ASCII present: untouched
+    assert repair_mojibake("1") == "1"
+    assert repair_mojibake(None) is None
+
+    data = apartment()
+    data["rooms"]["r1"]["label"] = "\u00ce\u00d4\u00ca\u00d2"
+    plan = load_floorplan(data)
+    assert plan.rooms["r1"].label_text == "卧室"

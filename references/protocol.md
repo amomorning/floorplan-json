@@ -248,5 +248,5 @@ y_mm = (imageHeight − y_px) * s        // 翻成 y 向上
 | 两个房间指向同一个面 | 面积重复计算 | 去重后报 `room_face_shared`，不要直接求和 |
 | `label` 含 U+FFFD | 语义丢失（不可逆） | 用 color → 预设名兜底 |
 | `connectedWallIds` 与实际墙体不一致 | 依赖它会算错节点度数 | 永远从 `walls[]` 反推 |
-| 洞口 `position·墙长 + width > 墙长` | 门窗画到墙外 | 报 `opening_exceeds_wall`，分析时夹到墙长 |
+| 洞口 `position·墙长 + width > 墙长` | 门窗画到墙外 | 报 `opening_exceeds_wall`；几何夹到墙长，`effective_width_mm` 是实际宽度 |
 | 有底图但矩阵是单位阵 | mm 尺寸不可信 | 报 `uncalibrated`（error），拒绝出面积/工程量结论 |

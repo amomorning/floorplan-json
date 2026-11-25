@@ -55,6 +55,42 @@ print(list(nx.connected_components(g)))
 - 同一面墙两侧的房间都会挂上这扇门，因此门在 `room.doors` 里可能重复出现。
 - 两个房间记录指向同一个面时不是邻接关系（本实现已按面去重）。
 
+## 2.1 功能泡泡图（建筑师看的功能图结构）
+
+一个气泡 = 一个房间**面**（同面房间合并成一个气泡），半径 ∝ √面积；边 = 共用墙，
+有门实线、只共墙虚线。`room_adjacency()` 会把指向同一面的两个房间交叉相乘，
+做功能图用 `face_adjacency()`（或 `summarize()["adjacency"]["pairs"]`）。
+
+```python
+import math
+import networkx as nx
+
+faces = {}
+for room in plan.rooms.values():
+    if room.face is not None:
+        faces.setdefault(room.face.id, []).append(room)
+
+g = nx.Graph()
+for fid, rooms in faces.items():
+    face = rooms[0].face
+    g.add_node(fid,
+               area_m2=face.area_m2,
+               radius=math.sqrt(face.area_mm2 / math.pi) * 0.55,   # 真实比例 55%
+               pos=face.label_anchor,
+               label=" / ".join(r.label_text or "房间" for r in rooms))
+
+for fa, fb, wall_ids, shared_mm in plan.face_adjacency():
+    doors = [o for o in plan.openings.values()
+             if o.wall is not None and o.wall.id in wall_ids and o.passable]
+    g.add_edge(fa.id, fb.id, shared_mm=shared_mm, doors=len(doors))
+
+# 画：geo = 用 pos + radius（圆面积=房间面积）；拓扑 = nx.spring_layout(weight=shared_mm)
+# 入口：外墙上的可通行洞口 (o.outside and o.passable) 连一个“室外”气泡
+```
+
+`doors == 0` 的边是“两个房间只共墙、没有门”：浴室/卫生间出现这种边，
+通常意味着门在别的墙上，或者房间的 `wallIds` 过期了。
+
 ## 3. 门窗表 / 开窗率
 
 ```python
@@ -189,7 +225,11 @@ unreachable = [rid for rid in rooms if rid not in dist]
 | 洞口数量 | `len(plan.openings)`（按 `type` 过滤） |
 | 轴网开间 | §12 `axis_bays_mm(plan, plan.raw["axisGrids"][gid])` |
 | 立面朝向 | `plan.frame.aligned_axes()` 给出标定后的两个单位向量 |
-| 问题清单 | `plan.issues`（`level` ∈ error/warning/info） |
+| 问题清单 | `plan.issues`（`level` ∈ error/warning/info；`message` 是句子，`entity` 是记录 id） |
+| 节点度 / 连通分量 / 孤立节点 | `plan.degrees()` / `plan.components()` / `plan.isolated_nodes()` |
+| 洞口实际宽度 | `opening.effective_width_mm`（`clamped` 为真 = 导出宽度超出墙长） |
+| 去重后的建筑面积 | `summarize(plan)["rooms"]["total_face_area_m2"]`（按面，不重复计同面房间） |
+| 旋转到标定网格 | `plan.to_grid(geom)`（`Frame.to_grid`，仅影响展示，面积/长度不变） |
 
 ## 10. 柱 / 家具 / 文字（参数表，十行以内）
 
