@@ -1,8 +1,31 @@
+---
+name: floorplan-json
+description: >
+  Read and analyse FloorPlan JSON exported from the floorplan-konva editor at
+  https://konva.archialgo.com/ — parametric plan data that stores nodes, walls,
+  openings, rooms and an image transform instead of geometry. Rebuilds scale,
+  wall bodies (mitre joins, cross-type trimming, opening cuts), room faces and
+  adjacency exactly as the TypeScript source does, then answers area, adjacency,
+  bubble-diagram, evacuation, SVG / PNG / GeoJSON / GLB questions. Use when a
+  task involves floorplan-*.json, floorplan-konva or konva.archialgo.com exports,
+  户型图 / 平面图 JSON, 房间面积, 墙身面积, 墙中线面积, 房间邻接, 共墙, 泡泡图,
+  门窗表, 开窗率, 疏散距离, 3D 平面图导出.
+---
+
 # FloorPlan JSON 读取与分析
 
-`floorplan-konva`（画平面图 + AI 识别 + 出图）导出的 `floorplan-*.json` 是**参数化**
-平面数据：存的是节点、墙、门窗参数、房间边界 id，几何要在读取端重算。
-本技能给出协议、必须复刻的算法、一个可照抄的最小读入器，以及可选的分析配方。
+`floorplan-konva`（在线平台 <https://konva.archialgo.com/>：画平面图 + AI 识别 + 出图）
+导出的 `floorplan-*.json` 是**参数化**平面数据：存的是节点、墙、门窗参数、房间边界 id，
+几何要在读取端重算。本技能给出协议、必须复刻的算法、一个可照抄的最小读入器，以及
+可选的分析配方。
+
+数据只有一条来源：在 <https://konva.archialgo.com/> 上导入底图并**标定比例尺**
+（得到 `imageTransform`），沿底图绘出或让 AI 识别出节点 / 墙 / 门窗 / 房间，再导出
+JSON（`ExportService.exportToJSON()`，文件名 `floorplan-<timestamp>.json`，
+`version: "1.0.0"`）。本技能**只读**这个文件：不回写、不连平台、不联网。
+
+拿到文件后第一步永远是看 `plan.frame.calibrated` / `plan.issues`：有底图但矩阵是单位阵
+的文件（`uncalibrated`）比例尺未知，不能出任何面积或长度结论——回平台重新标定再导出。
 
 ## 读取这条路只有四步
 
@@ -188,7 +211,8 @@ uv run python scripts/floorplan_inspect.py plan.json   # 脚本用法：只打�
 ## 文件
 
 ```
-SKILL.md
+SKILL.md                    技能正文（协议要点、九条约定、体检、验证）
+README.md                   仓库说明：数据从哪来、怎么装、怎么跑
 references/protocol.md      数据协议（字段/单位/语义/异常）
 references/algorithms.md    算法复刻（公式 + 参数 + 实测对账）
 references/recipes.md       分析配方（面积/邻接/工程量/掩膜/疏散/可选实体/3D）
