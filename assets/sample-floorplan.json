@@ -1,0 +1,248 @@
+{
+  "version": "1.0.0",
+  "exportedAt": "2026-01-01T00:00:00.000Z",
+  "nodes": {
+    "n1": {
+      "id": "n1",
+      "x": 50,
+      "y": 60,
+      "connectedWallIds": [
+        "w1a",
+        "w4"
+      ]
+    },
+    "n2": {
+      "id": "n2",
+      "x": 250,
+      "y": 60,
+      "connectedWallIds": [
+        "w1b",
+        "w2"
+      ]
+    },
+    "n3": {
+      "id": "n3",
+      "x": 250,
+      "y": 180,
+      "connectedWallIds": [
+        "w2",
+        "w3a"
+      ]
+    },
+    "n4": {
+      "id": "n4",
+      "x": 50,
+      "y": 180,
+      "connectedWallIds": [
+        "w3b",
+        "w4"
+      ]
+    },
+    "n5": {
+      "id": "n5",
+      "x": 150,
+      "y": 60,
+      "connectedWallIds": [
+        "w1a",
+        "w1b",
+        "w5"
+      ]
+    },
+    "n6": {
+      "id": "n6",
+      "x": 150,
+      "y": 180,
+      "connectedWallIds": [
+        "w3a",
+        "w3b",
+        "w5"
+      ]
+    }
+  },
+  "walls": {
+    "w1a": {
+      "id": "w1a",
+      "startNodeId": "n1",
+      "endNodeId": "n5",
+      "thickness": 300,
+      "type": "exterior"
+    },
+    "w1b": {
+      "id": "w1b",
+      "startNodeId": "n5",
+      "endNodeId": "n2",
+      "thickness": 300,
+      "type": "exterior"
+    },
+    "w2": {
+      "id": "w2",
+      "startNodeId": "n2",
+      "endNodeId": "n3",
+      "thickness": 300,
+      "type": "exterior"
+    },
+    "w3a": {
+      "id": "w3a",
+      "startNodeId": "n3",
+      "endNodeId": "n6",
+      "thickness": 300,
+      "type": "exterior"
+    },
+    "w3b": {
+      "id": "w3b",
+      "startNodeId": "n6",
+      "endNodeId": "n4",
+      "thickness": 300,
+      "type": "exterior"
+    },
+    "w4": {
+      "id": "w4",
+      "startNodeId": "n4",
+      "endNodeId": "n1",
+      "thickness": 300,
+      "type": "exterior"
+    },
+    "w5": {
+      "id": "w5",
+      "startNodeId": "n5",
+      "endNodeId": "n6",
+      "thickness": 200,
+      "type": "interior"
+    }
+  },
+  "openings": {
+    "d1": {
+      "id": "d1",
+      "wallId": "w5",
+      "type": "door",
+      "position": 0.5,
+      "width": 900,
+      "direction": 1,
+      "hingeSide": "start"
+    },
+    "entry": {
+      "id": "entry",
+      "wallId": "w4",
+      "type": "door",
+      "position": 0.1,
+      "width": 900,
+      "direction": 1,
+      "hingeSide": "end"
+    },
+    "win": {
+      "id": "win",
+      "wallId": "w3a",
+      "type": "window",
+      "position": 0.25,
+      "width": 1500,
+      "direction": 1
+    }
+  },
+  "columns": {
+    "c1": {
+      "id": "c1",
+      "x": 100,
+      "y": 120,
+      "shape": "rectangle",
+      "width": 400,
+      "height": 600,
+      "rotation": 90
+    }
+  },
+  "rooms": {
+    "r1": {
+      "id": "r1",
+      "wallIds": [
+        "w1a",
+        "w5",
+        "w3b",
+        "w4"
+      ],
+      "label": "卧室",
+      "color": "#8DCBEB"
+    },
+    "r2": {
+      "id": "r2",
+      "wallIds": [
+        "w1b",
+        "w2",
+        "w3a",
+        "w5"
+      ],
+      "label": "客厅",
+      "color": "#E085F2"
+    }
+  },
+  "verticals": {
+    "v1": {
+      "id": "v1",
+      "kind": "elevator",
+      "x": 200,
+      "y": 120,
+      "rotation": 0,
+      "shaftWidth": 2000,
+      "shaftDepth": 2200
+    },
+    "v2": {
+      "id": "v2",
+      "kind": "stair_straight",
+      "x": 10,
+      "y": 10,
+      "rotation": 0,
+      "stairwellWidth": 1500,
+      "stairwellLength": 4800,
+      "floorHeight": 3000,
+      "direction": 1,
+      "floorType": "mid"
+    }
+  },
+  "furniture": {
+    "f1": {
+      "id": "f1",
+      "symbolId": "bed_double",
+      "x": 100,
+      "y": 90,
+      "rotation": 0,
+      "flipped": false,
+      "width": 1800,
+      "height": 2000
+    }
+  },
+  "texts": {
+    "t1": {
+      "id": "t1",
+      "x": 60,
+      "y": 70,
+      "text": "主卧",
+      "fontSize": 300,
+      "rotation": 0
+    }
+  },
+  "axisGrids": {
+    "g1": {
+      "id": "g1",
+      "schemeId": "s",
+      "rotation": 0.0,
+      "gridOffsetX": 0,
+      "gridOffsetY": 0,
+      "verticalAxes": [],
+      "horizontalAxes": [
+        10,
+        22,
+        40
+      ]
+    }
+  },
+  "imageTransform": {
+    "a": 25.0,
+    "b": 0.0,
+    "c": -0.0,
+    "d": 25.0,
+    "e": 0,
+    "f": 0
+  },
+  "metadata": {
+    "imageWidth": 400,
+    "imageHeight": 300
+  }
+}

@@ -1,0 +1,34 @@
+[project]
+name = "floorplan-json-skill"
+version = "0.2.0"
+description = "Reference reader for FloorPlan JSON (floorplan-konva export): shapely + optional matplotlib"
+requires-python = ">=3.10"
+dependencies = [
+    "shapely>=2.0",
+]
+
+[project.optional-dependencies]
+png = [
+    "matplotlib>=3.8",
+]
+glb = [
+    "trimesh>=4.0",
+    "mapbox-earcut>=1.0",
+]
+
+[dependency-groups]
+dev = [
+    "matplotlib>=3.8",
+    "pytest>=8",
+    # test_recipes.py executes the 3D recipe (recipes.md §13)
+    "trimesh>=4.0",
+    "mapbox-earcut>=1.0",
+]
+
+# Virtual project: the scripts are run in place, never installed as a package.
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["scripts"]
+testpaths = ["tests"]
